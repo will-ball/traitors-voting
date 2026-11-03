@@ -1,9 +1,11 @@
 # make_header.R
-# Creates header.png for the report: a stylised, stepped running-score chart.
+# Creates the report's images from a stylised, stepped running-score chart:
+#   header.png - the wide banner behind the title
+#   share.png  - a 1200 x 630 image for link previews on social media
 #
-# Run this from the folder that contains traitors_scorecard_report.qmd.
+# Run this from the folder that contains index.qmd.
 # It runs the report's own code to get the data (this scrapes Wikipedia, so it
-# takes a few seconds), then saves header.png into the same folder.
+# takes a few seconds), then saves both images into the same folder.
 
 library(tidyverse)
 library(knitr)
@@ -72,3 +74,23 @@ header <- ggplot(header_data, aes(round_table_number, score, group = player)) +
 # Wide and short, to match the banner's shape so none of it gets cropped
 ggsave("header.png", header, width = 12, height = 1.8, dpi = 200, bg = "#0E0E10")
 message("Saved header.png")
+
+# ---- Share image for link previews --------------------------------------------------
+# Social sites show link previews at roughly 1.91:1, so the wide banner gets
+# cropped. This version uses the same lines at 1200 x 630 pixels, with the title
+# written on, since a preview image is often seen without the page around it.
+share <- header +
+  labs(title    = "Can a Faithful spot a Traitor\nfrom the votes alone?",
+       subtitle = "A voting scorecard for The Traitors UK",
+       caption  = "traitors.wpball.com") +
+  theme(plot.title    = element_text(colour = "white", face = "bold", size = 24,
+                                     lineheight = 1.05, margin = margin(b = 8)),
+        plot.subtitle = element_text(colour = "grey75", size = 14, margin = margin(b = 18)),
+        plot.caption  = element_text(colour = "grey55", size = 11, hjust = 0),
+        plot.title.position   = "plot",
+        plot.caption.position = "plot",
+        plot.margin = margin(0.4, 0.4, 0.3, 0.4, unit = "in"))
+
+# 6 x 3.15 inches at 200 dpi = 1200 x 630 pixels
+ggsave("share.png", share, width = 6, height = 3.15, dpi = 200, bg = "#0E0E10")
+message("Saved share.png")

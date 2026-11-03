@@ -3,7 +3,8 @@ title: "Can a Faithful spot a Traitor from the votes alone?"
 subtitle: "A voting scorecard for The Traitors UK"
 author: "Dr Will Ball"
 description: "Can a Faithful spot the Traitors from round table votes alone? A running suspicion score built from every UK Traitors vote."
-image: header.png
+# The image used in link previews when the post is shared (made by make_header.R)
+image: share.png
 lang: en-GB
 date: today
 format:
@@ -358,7 +359,7 @@ room of up to twenty, and early on there is very little to go on. If the
 banished player had simply been drawn from a hat, `r scales::percent(pct_chance_banished)`
 of banishments would have caught a Traitor.
 
-```{r}
+```{r, fig.alt = str_glue("Horizontal bar chart comparing, for each series and for all series combined, the share of banishments that removed a Traitor with the share expected if the banished player had been picked at random. Overall, {scales::percent(pct_traitor_banished)} of banishments caught a Traitor against {scales::percent(pct_chance_banished)} by chance, and in some series the round table did no better than a random pick.")}
 #| label: fig-banishments
 #| code-summary: "Plot banishments against chance"
 #| fig-cap: "Share of banishments that removed a Traitor, against the share expected if the banished player had been picked at random from the room."
@@ -559,7 +560,7 @@ all_points_from <- function(use_series) {
 scorecard <- all_points_from(pages$series)
 ```
 
-```{r}
+```{r, fig.alt = str_glue("Horizontal bar chart of {nrow(scorecard)} voting behaviours, ordered from most typical of Traitors at the top to most typical of Faithfuls at the bottom. Red bars to the right add suspicion and blue bars to the left reduce it, and each bar is labelled with its points. The strongest Traitor signal is: {scorecard$behaviour[which.max(scorecard$llr)]}. The strongest Faithful signal is: {scorecard$behaviour[which.min(scorecard$llr)]}.")}
 #| label: fig-scorecard
 #| code-summary: "Plot the scorecard"
 #| fig-cap: "The scorecard. Bars show how much each behaviour shifts suspicion; labels show its points. Counts are Traitor votes / Faithful votes (for the 'voted for by' row, votes received)."
@@ -728,7 +729,7 @@ after_reveal %>%
         align = "lrrrr")
 ```
 
-```{r}
+```{r, fig.alt = str_glue("Line chart of how often the pick was a Traitor at each round table, averaged across series, for the scorecard's top suspect, the round table's own choice and a random pick. The scorecard stays close to chance early on and pulls ahead later. Before any Traitor was revealed its top suspect was a Traitor {scales::percent(after_reveal$score[after_reveal$revealed == 'No Traitor revealed yet'])} of the time; after at least one reveal, {scales::percent(after_reveal$score[after_reveal$revealed == 'At least one Traitor revealed'])}.")}
 #| label: fig-by-round
 #| code-summary: "Plot accuracy round table by round table"
 #| fig-cap: "Averaged across series. Only round table numbers reached by at least three series are shown."
@@ -763,6 +764,7 @@ where they had switched sides.
 #| code-summary: "Plot every player's running score"
 #| fig-cap: "Running suspicion score before each round table (higher = more suspicious). Red = Traitor at the time; grey = Faithful. Each score holds until the next round table, so the lines move in steps. Traitors are named where their red line ends."
 #| fig-height: 11
+#| fig-alt: "Six step charts, one for each series (UK 1 to 4 and Celebrity 1 and 2), showing every player's running suspicion score going into each round table. Faithfuls are thin grey lines and Traitors are thick red lines labelled with their names. Many Faithfuls drop well below zero once a Traitor has been revealed, while most Traitors stay near or above zero, though several Traitors also end well below zero."
 
 # Each player's score at each round table, with their role at the time
 running_scores <- heldout_scores %>%
@@ -832,6 +834,7 @@ best-placed Traitor ranked.
 #| code-summary: "Plot every round table in every series"
 #| fig-cap: "Number = rank of the highest-placed Traitor (1 = top suspect; = means tied). Early on, everyone is tied on zero."
 #| fig-height: 4.2
+#| fig-alt: "Grid with one row per series and one column per round table. Each cell gives the rank of the highest-placed Traitor in the scorecard and is shaded red when the top suspect was a Traitor and grey when not. Red cells are rare in the early round tables and more common later in each series."
 
 by_round_table %>%
   ggplot(aes(round_table_number, fct_rev(series), fill = score_hit)) +
