@@ -1,0 +1,1152 @@
+---
+title: "The Traitors UK: round table votes from Wikipedia"
+format: html
+execute:
+  warning: false
+  message: false
+---
+
+This document downloads the voting history table from each series' Wikipedia
+page and turns it into tidy data: one table per kind of observation.
+
+- `votes`: one row per vote cast at a round table, with each voter's (and
+  target's) role at the time, and flags for double votes and revotes
+- `round_tables`: one row per round table (who was banished, the published
+  tally, whether it was a tie or a revote)
+- `players`: one row per player (full name, how they left, when they became a
+  Traitor)
+
+Two things aren't in Wikipedia's voting table, so they are kept as short
+hand-maintained lists in the second chunk: who the Traitors were and when each
+one became a Traitor, and who held a double vote. Update these as a series
+goes on.
+
+A checks chunk compares the scraped votes with the tallies Wikipedia
+publishes, so you can see straight away if a page's layout has changed. A
+descriptive statistics chunk then summarises the voting data. The
+last two chunks build a suspicion scorecard from the voting patterns that
+separate Traitors from Faithfuls, test how well it works, and plot the results.
+
+## Setup
+
+```{r}
+#| label: setup
+
+library(tidyverse)
+library(rvest)
+library(httr2)
+
+# Wikipedia asks scripts to identify themselves with a descriptive user agent
+wiki_user_agent <- "traitors-voting-analysis (personal R project)"
+
+# Pause between page requests, in seconds, to be polite to Wikipedia
+pause_between_pages <- 1
+
+options(dplyr.summarise.inform = FALSE)
+```
+
+## Scrape and tidy
+
+```{r}
+#| label: scrape
+
+# ---- Pages to scrape: add new series here --------------------------------
+pages <- tribble(
+  ~series, ~page,
+  "UK 1",        "The_Traitors_(British_TV_series)_series_1",
+  "UK 2",        "The_Traitors_(British_TV_series)_series_2",
+  "UK 3",        "The_Traitors_(British_TV_series)_series_3",
+  "UK 4",        "The_Traitors_(British_TV_series)_series_4",
+  "Celebrity 1", "The_Celebrity_Traitors_series_1",
+  "Celebrity 2", "The_Celebrity_Traitors_series_2"
+)
+
+# ---- Hand-maintained: every Traitor -----------------------------------------
+# traitor_from_episode = the first episode whose round table they voted at as
+# a Traitor. Original Traitors are 1. Recruits are the episode after their
+# recruitment, or the same episode if they were recruited before that night's
+# round table (e.g. an ultimatum in the morning).
+# `name` can be a full name or the name used in the voting table.
+traitors <- tribble(
+  ~series,       ~name,              ~traitor_from_episode, ~how,
+  "UK 1",        "Wilfred Webster",   1, "original",
+  "UK 1",        "Amanda Lovett",     1, "original",
+  "UK 1",        "Alyssa Chan",       1, "original",
+  "UK 1",        "Kieran Tompsett",  11, "ultimatum",
+  "UK 2",        "Harry Clark",       1, "original",
+  "UK 2",        "Paul Gorton",       1, "original",
+  "UK 2",        "Ash Bibi",          1, "original",
+  "UK 2",        "Miles Asteri",      1, "recruited",
+  "UK 2",        "Andrew Jenkins",    8, "recruited",
+  "UK 2",        "Ross Carson",      10, "recruited",
+  "UK 3",        "Armani Gouveia",    1, "original",
+  "UK 3",        "Linda Rands",       1, "original",
+  "UK 3",        "Minah Shannon",     1, "original",
+  "UK 3",        "Charlotte Berman",  8, "ultimatum",
+  "UK 3",        "Freddie Fraser",   11, "recruited",
+  "UK 4",        "Rachel Duffy",      1, "original",
+  "UK 4",        "Stephen Libby",     1, "original",
+  "UK 4",        "Hugo Lodge",        1, "original",
+  "UK 4",        "Fiona Hughes",      1, "secret",
+  "Celebrity 1", "Alan Carr",         1, "original",
+  "Celebrity 1", "Jonathan Ross",     1, "original",
+  "Celebrity 1", "Cat Burns",         1, "original",
+  "Celebrity 2", "Maya Jama",         1, "original",
+  "Celebrity 2", "Richard E. Grant",  1, "original",
+  "Celebrity 2", "James Acaster",     1, "recruited",
+  "Celebrity 2", "Hannah Fry",        4, "recruited",
+  "Celebrity 2", "King Kenny",        6, "recruited"
+)
+
+# ---- Hand-maintained: double votes (e.g. holding the dagger) -----------------
+# vote_in_episode picks out one round table when an episode has more than one
+# (1 = the first round table that episode). Leave it NA to cover every round
+# table in the episode.
+double_votes <- tribble(
+  ~series,       ~episode, ~vote_in_episode, ~name,
+  "UK 4",        10,       NA,               "James",
+  "Celebrity 2",  8,       NA,               "King Kenny",
+  "Celebrity 2",  9,        1,               "King Kenny"
+)
+
+# ---- Helpers ---------------------------------------------------------------
+fetch_page <- function(page) {
+  Sys.sleep(pause_between_pages)
+  request(str_c("https://en.wikipedia.org/wiki/", page)) %>%
+    req_user_agent(wiki_user_agent) %>%
+    req_retry(max_tries = 3) %>%
+    req_perform() %>%
+    resp_body_html()
+}
+
+# Remove footnote markers like [a] or [12] and tidy whitespace
+clean_cell <- function(x) {
+  x %>%
+    str_remove_all("\\[[^\\]]*\\]") %>%
+    str_replace_all("\\p{Pd}", "-") %>%
+    str_squish()
+}
+
+# Every wikitable on the page as a character tibble. Merged cells (colspan/
+# rowspan) are repeated into each column they cover.
+page_tables <- function(html) {
+  html %>%
+    html_elements("table.wikitable") %>%
+    map(\(t) html_table(t, header = FALSE, convert = FALSE) %>%
+          mutate(across(everything(), clean_cell)))
+}
+
+# The voting table has row labels "Episode", "Banishment" (or "Banished") and
+# "Vote" in its first column. The fire-pit table has no Banishment row.
+pick_voting_table <- function(tables) {
+  is_voting <- map_lgl(tables, \(d)
+    any(str_detect(d[[1]], "^Episode"), na.rm = TRUE) &&
+      any(str_detect(d[[1]], "^Banish"), na.rm = TRUE) &&
+      any(d[[1]] == "Vote", na.rm = TRUE))
+  if (!any(is_voting)) stop("No voting history table found on this page")
+  candidates <- tables[is_voting]
+  candidates[[which.max(map_int(candidates, nrow))]]
+}
+
+# The cast table is the one with an "Affiliation" column header
+pick_cast_table <- function(tables) {
+  cast <- keep(tables, \(d) any(unlist(d[1, ]) == "Affiliation", na.rm = TRUE))
+  if (length(cast) == 0) return(NULL)
+  cast <- cast[[1]]
+  names(cast) <- make.unique(unlist(cast[1, ]))
+  cast[-1, ] %>%
+    transmute(full_name = .data[[names(cast)[1]]], cast_affiliation = Affiliation)
+}
+
+# Match a short name from the voting table ("Wilfred", "James A.") to a full
+# name ("Wilfred Webster", "James Acaster"). Returns NA unless exactly one fits.
+match_full_name <- function(short, full_names) {
+  parts   <- str_match(short, "^(.+?)\\s+([A-Z])\\.?$")
+  first   <- coalesce(parts[, 2], short)
+  initial <- parts[, 3]
+  hit <- map_lgl(str_split(full_names, "\\s+"), \(w)
+    first %in% w && (is.na(initial) || any(str_starts(setdiff(w, first), initial))))
+  if (sum(hit) == 1) full_names[hit] else NA_character_
+}
+
+# Attach the voting-table name (`player`) to a hand-maintained list keyed by `name`
+link_to_players <- function(lookup, players) {
+  lookup %>%
+    inner_join(players %>% distinct(series, player), by = "series",
+               relationship = "many-to-many") %>%
+    filter(player == name |
+             map2_lgl(player, name, \(p, n) identical(match_full_name(p, n), n)))
+}
+
+fate_pattern     <- "^(Murdered|Banished|Winner|Runner-up|Eliminated|Withdrew|Left|Removed|Disqualified)"
+non_vote_pattern <- "^(No ?vote|None|Immune|Shield|Ineligible|-|N/A)?$"
+is_vote <- function(x) !is.na(x) & !str_detect(x, fate_pattern) & !str_detect(x, non_vote_pattern)
+
+parse_series <- function(series, page) {
+  html <- fetch_page(page)
+  tabs <- page_tables(html)
+  d    <- pick_voting_table(tabs)
+
+  ep_row   <- which(str_detect(d[[1]], "^Episode"))[1]
+  ban_row  <- which(str_detect(d[[1]], "^Banish"))[1]
+  vote_row <- which(d[[1]] == "Vote")[1]
+
+  # Row labels span the first few columns; player names sit in the last of them
+  label_cols <- which(unlist(d[ep_row, ]) == "Episode")
+  name_col   <- names(d)[max(label_cols)]
+  data_cols  <- names(d)[-label_cols]
+
+  # One row per column of the table
+  columns <- tibble(
+    col      = data_cols,
+    episode  = as.integer(str_extract(unlist(d[ep_row, data_cols]), "^\\d+$")),
+    banished = unlist(d[ban_row, data_cols]),
+    tally    = str_remove_all(unlist(d[vote_row, data_cols]), "\\s")
+  ) %>%
+    filter(!is.na(episode))
+
+  cells <- d[seq(vote_row + 1, nrow(d)), ] %>%
+    rename(player = all_of(name_col)) %>%
+    filter(!is.na(player), player != "") %>%
+    select(player, all_of(columns$col)) %>%
+    pivot_longer(-player, names_to = "col", values_to = "cell")
+
+  # An episode is often split into two columns only because the Traitors'
+  # decision row has two entries; the votes underneath are repeated. Keep one
+  # copy of each distinct round table.
+  columns <- cells %>%
+    arrange(player) %>%
+    summarise(signature = str_c(player, "=", coalesce(cell, ""), collapse = ";"), .by = col) %>%
+    right_join(columns, by = "col") %>%
+    mutate(signature = str_c(banished, tally, signature, sep = "|")) %>%
+    distinct(episode, signature, .keep_all = TRUE) %>%
+    select(-signature)
+
+  cells <- cells %>% semi_join(columns, by = "col")
+
+  votes <- cells %>%
+    filter(is_vote(cell)) %>%
+    select(col, voter = player, voted_for = cell)
+
+  # Keep only columns where votes were cast, number them, and flag ties.
+  # A revote is the round table straight after a tie (sometimes in the next
+  # episode). A tied revote is settled by chance, not another revote.
+  round_tables <- columns %>%
+    semi_join(votes, by = "col") %>%
+    mutate(round_table = row_number()) %>%
+    mutate(vote_in_episode = row_number(), .by = episode) %>%
+    mutate(tie = str_detect(banished, "^Tie"),
+           revote = accumulate(lag(tie, default = FALSE),
+                               \(prev_revote, prev_tie) prev_tie & !prev_revote,
+                               .init = FALSE)[-1],
+           series,
+           banished = if_else(tie | !is_vote(banished), NA_character_, banished))
+
+  votes <- votes %>%
+    inner_join(round_tables %>% select(col, round_table, episode, vote_in_episode, revote),
+               by = "col") %>%
+    transmute(series, round_table, episode, vote_in_episode, revote, voter, voted_for) %>%
+    arrange(round_table, voter)
+
+  cast <- pick_cast_table(tabs)
+  players <- cells %>%
+    summarise(fate_text = last(cell[str_detect(coalesce(cell, ""), fate_pattern)]), .by = player) %>%
+    mutate(series,
+           fate = str_extract(fate_text, "^[A-Za-z-]+"),
+           fate_episode = as.integer(str_extract(fate_text, "\\d+")),
+           .before = 1) %>%
+    select(-fate_text)
+
+  if (!is.null(cast)) {
+    players <- players %>%
+      mutate(full_name = map_chr(player, match_full_name, full_names = cast$full_name)) %>%
+      left_join(cast, by = "full_name")
+  }
+
+  list(
+    votes = votes,
+    round_tables = round_tables %>%
+      select(series, round_table, episode, vote_in_episode, banished, tie, revote, tally),
+    players = players
+  )
+}
+
+# ---- Run it ------------------------------------------------------------------
+scraped <- pages %>%
+  mutate(result = map2(series, page, parse_series, .progress = TRUE))
+
+votes        <- scraped$result %>% map("votes") %>% list_rbind()
+round_tables <- scraped$result %>% map("round_tables") %>% list_rbind()
+players      <- scraped$result %>% map("players") %>% list_rbind()
+
+# ---- Add roles and double votes --------------------------------------------
+traitor_links <- link_to_players(traitors, players) %>%
+  select(series, player, traitor_from_episode, how_traitor = how)
+
+double_links <- link_to_players(double_votes, players) %>%
+  transmute(series, episode, dv_vote_in_episode = vote_in_episode, voter = player)
+
+players <- players %>%
+  left_join(traitor_links, by = c("series", "player")) %>%
+  relocate(series, player, full_name, cast_affiliation, traitor_from_episode,
+           how_traitor, fate, fate_episode)
+
+role_at <- function(player_col, episode_col, series_col) {
+  tibble(series = series_col, player = player_col, episode = episode_col) %>%
+    left_join(traitor_links, by = c("series", "player")) %>%
+    mutate(role = if_else(!is.na(traitor_from_episode) & episode >= traitor_from_episode,
+                          "Traitor", "Faithful")) %>%
+    pull(role)
+}
+
+double_vote_keys <- votes %>%
+  inner_join(double_links, by = c("series", "episode", "voter"),
+             relationship = "many-to-many") %>%
+  filter(is.na(dv_vote_in_episode) | dv_vote_in_episode == vote_in_episode) %>%
+  distinct(series, round_table, voter) %>%
+  mutate(double_vote = TRUE)
+
+votes <- votes %>%
+  mutate(voter_affiliation    = role_at(voter, episode, series),
+         voted_for_affiliation = role_at(voted_for, episode, series)) %>%
+  left_join(double_vote_keys, by = c("series", "round_table", "voter")) %>%
+  mutate(double_vote = coalesce(double_vote, FALSE)) %>%
+  relocate(series, round_table, episode, vote_in_episode, revote,
+           voter, voter_affiliation, voted_for, voted_for_affiliation, double_vote)
+
+votes
+round_tables
+players
+
+# For analysis without tie revotes:
+# votes %>% filter(!revote)
+
+# Optional: save to CSV
+# write_csv(votes, "traitors_votes.csv")
+# write_csv(round_tables, "traitors_round_tables.csv")
+# write_csv(players, "traitors_players.csv")
+```
+
+## Checks
+
+```{r}
+#| label: check
+
+# 1. Round tables where the recounted votes don't match Wikipedia's "Vote" row
+#    (double votes are counted twice). Anything here usually means a page's
+#    layout has changed, or a double vote is missing from `double_votes`.
+recomputed <- votes %>%
+  count(series, round_table, voted_for, wt = if_else(double_vote, 2L, 1L)) %>%
+  arrange(series, round_table, desc(n)) %>%
+  summarise(recomputed = str_c(n, collapse = "-"), .by = c(series, round_table))
+
+round_tables %>%
+  left_join(recomputed, by = c("series", "round_table")) %>%
+  filter(tally != recomputed)
+
+# 2. Votes for someone who isn't a player in that series (a parsing issue)
+votes %>%
+  anti_join(players, by = c("series", "voted_for" = "player")) %>%
+  count(series, voted_for)
+
+# 3. Entries in the hand-maintained lists that didn't match a player
+traitors %>% anti_join(link_to_players(traitors, players), by = c("series", "name"))
+double_votes %>% anti_join(link_to_players(double_votes, players), by = c("series", "name"))
+
+# 4. Players the cast table lists as Traitors who aren't in `traitors`
+#    (worth checking when you add a new series)
+players %>%
+  filter(str_detect(coalesce(cast_affiliation, ""), "Traitor"), is.na(traitor_from_episode))
+```
+
+
+## Descriptive statistics
+
+A first look at the voting data. Revotes are counted in the series overview
+but left out everywhere else, because the choice is forced between the tied
+players. "Traitor" and "Faithful" mean the voter's role when they voted.
+
+```{r}
+#| label: descriptives
+
+desc_votes <- votes %>% filter(!revote)
+
+pct <- function(x) round(100 * x, 1)
+
+# ---- 1. Series overview -----------------------------------------------------
+series_overview <- players %>%
+  summarise(players = n(),
+            traitors = sum(!is.na(traitor_from_episode)),
+            recruited_traitors = sum(how_traitor %in% c("recruited", "ultimatum")),
+            murdered = sum(fate %in% "Murdered"),
+            banished = sum(fate %in% "Banished"),
+            traitors_banished = sum(fate %in% "Banished" & !is.na(traitor_from_episode)),
+            .by = series) %>%
+  left_join(round_tables %>%
+              summarise(round_tables = sum(!revote), ties = sum(tie & !revote),
+                        revotes = sum(revote), .by = series),
+            by = "series") %>%
+  left_join(votes %>%
+              summarise(votes_cast = sum(!revote), revote_votes = sum(revote),
+                        double_votes = sum(double_vote), .by = series),
+            by = "series")
+
+# ---- 2. What a typical round table looks like ---------------------------------
+round_table_summary <- desc_votes %>%
+  count(series, round_table, episode, voted_for) %>%
+  summarise(voters = sum(n), different_targets = n(), top_target_share = max(n) / sum(n),
+            .by = c(series, round_table, episode))
+
+# Every round table that ended in a banishment, revotes included
+banishments <- round_tables %>%
+  filter(!is.na(banished)) %>%
+  left_join(traitor_links %>% select(series, banished = player, traitor_from_episode),
+            by = c("series", "banished")) %>%
+  mutate(banished_traitor = !is.na(traitor_from_episode) & episode >= traitor_from_episode)
+
+round_table_by_series <- round_table_summary %>%
+  summarise(round_tables = n(),
+            median_voters = median(voters),
+            mean_different_targets = round(mean(different_targets), 1),
+            pct_votes_to_top_target = pct(mean(top_target_share)),
+            pct_unanimous_or_near = pct(mean(top_target_share >= 0.8)),
+            .by = series) %>%
+  left_join(banishments %>%
+              summarise(banishments = n(), pct_banishing_a_traitor = pct(mean(banished_traitor)),
+                        .by = series),
+            by = "series")
+
+# ---- 3. Traitors' votes compared with Faithfuls' --------------------------------
+tally_desc <- desc_votes %>%
+  count(series, round_table, voted_for, name = "target_votes") %>%
+  mutate(top = target_votes == max(target_votes), .by = c(series, round_table))
+
+votes_by_role <- desc_votes %>%
+  left_join(tally_desc, by = c("series", "round_table", "voted_for")) %>%
+  left_join(round_tables %>% select(series, round_table, banished), by = c("series", "round_table")) %>%
+  summarise(votes = n(),
+            pct_for_top_target = pct(mean(top)),
+            pct_lone_votes = pct(mean(target_votes == 1)),
+            pct_for_a_traitor = pct(mean(voted_for_affiliation == "Traitor")),
+            pct_for_who_was_banished = pct(mean(voted_for == coalesce(banished, ""))),
+            .by = voter_affiliation)
+
+# Faithfuls voting for a Traitor, against what random voting would give
+# (Traitors' share of the other players at the table)
+faithful_accuracy <- desc_votes %>%
+  filter(voter_affiliation == "Faithful") %>%
+  left_join(desc_votes %>%
+              summarise(players = n(), traitors = sum(voter_affiliation == "Traitor"),
+                        .by = c(series, round_table)),
+            by = c("series", "round_table")) %>%
+  summarise(faithful_votes = n(),
+            pct_for_a_traitor = pct(mean(voted_for_affiliation == "Traitor")),
+            pct_if_random = pct(mean(traitors / (players - 1))),
+            .by = series)
+
+# How many votes players received per round table, by their role at the time
+votes_received_by_role <- desc_votes %>%
+  distinct(series, round_table, episode, player = voter, role = voter_affiliation) %>%
+  left_join(desc_votes %>% count(series, round_table, player = voted_for, name = "received"),
+            by = c("series", "round_table", "player")) %>%
+  mutate(received = coalesce(received, 0L)) %>%
+  summarise(player_round_tables = n(),
+            mean_votes_received = round(mean(received), 2),
+            pct_received_none = pct(mean(received == 0)),
+            .by = role)
+
+# ---- 4. Players ------------------------------------------------------------------
+most_voted_for <- desc_votes %>%
+  count(series, player = voted_for, name = "votes_received") %>%
+  left_join(players %>% select(series, player, traitor_from_episode, fate), by = c("series", "player")) %>%
+  mutate(ever_traitor = !is.na(traitor_from_episode)) %>%
+  select(-traitor_from_episode) %>%
+  slice_max(votes_received, n = 10)
+
+never_voted_for <- desc_votes %>%
+  distinct(series, player = voter) %>%
+  anti_join(desc_votes %>% distinct(series, player = voted_for), by = c("series", "player")) %>%
+  left_join(players %>% select(series, player, traitor_from_episode, fate), by = c("series", "player")) %>%
+  mutate(ever_traitor = !is.na(traitor_from_episode)) %>%
+  select(-traitor_from_episode)
+
+series_overview
+round_table_by_series
+votes_by_role
+faithful_accuracy
+votes_received_by_role
+most_voted_for
+never_voted_for
+```
+
+## Analysis: a suspicion score a Faithful could keep
+
+The idea: every vote a player casts is evidence. Some voting behaviours are
+more typical of Traitors and some of Faithfuls, so a Faithful could keep a
+running score for each player, adding or taking away points after each round
+table.
+
+Only information a Faithful would have is used: who voted for whom, who was
+banished and what they revealed, and who was murdered (murder victims are
+always Faithful). Some behaviours can only be scored once a role is revealed,
+so each one records when it becomes known (`known_after`), and the points are
+added to the original vote at that point.
+
+**Behaviours**
+
+- *Where the vote went*: a lone vote, a minority pick, or the night's top target
+- *Consistency*: repeated their last target (if still in the game) or switched
+- *Who the target turned out to be*: a Traitor before they were caught, a
+  Traitor on the night they were caught (first vote for them, or having voted
+  for them before), a Faithful banished that night or later, or a Faithful
+  later murdered
+- *Agreement with revealed Traitors*: once a Traitor is revealed, whether each
+  player had voted the same way as them on the night's top target or on a
+  fringe pick, or differently
+- *Voted for by a Traitor*: once a Traitor is revealed, the people they voted
+  for on ordinary nights (when neither the Traitor nor their target left).
+  This one is scored for the person who received the vote. A Traitor's parting
+  vote on the night they're banished is left out, because it sometimes lands on
+  a fellow Traitor
+
+**Points** are log likelihood ratios: how much more often Traitors' votes show
+a behaviour than Faithfuls' votes do, on a log scale, with `unit` log-odds per
+point. "Where the vote went" is shown for interest but not scored, as earlier
+work found no difference between Traitors and Faithfuls on it.
+
+**Test**: points are learned from all series but one, then used to rank the
+players before every round table in the left-out series. This is repeated for
+each series in turn. Revotes and fire-pit votes are left out.
+
+```{r}
+#| label: analysis
+
+set.seed(2026)
+unit      <- 0.25   # log-odds per point (smaller = finer points)
+smoothing <- 1      # added to every count so rare behaviours don't get extreme points
+not_scored <- "Where the vote went"
+
+first_votes <- votes %>%
+  filter(!revote) %>%
+  mutate(traitor = voter_affiliation == "Traitor")
+
+rt_episodes <- round_tables %>% select(series, round_table, episode)
+
+# ---- Reveals: who was shown to be what, and after which round table --------
+banished_at_rt <- round_tables %>%
+  filter(!is.na(banished)) %>%
+  transmute(series, player = banished, how = "banished",
+            reveal_episode = episode, known_after = round_table)
+
+# Murders (revealed at breakfast, before that episode's round table) and
+# banishments not settled by a vote (e.g. drawn by chance after a tied revote)
+other_reveals <- players %>%
+  filter(fate %in% c("Banished", "Murdered")) %>%
+  anti_join(banished_at_rt, by = c("series", "player")) %>%
+  transmute(series, player, how = str_to_lower(fate), reveal_episode = fate_episode) %>%
+  inner_join(rt_episodes, by = "series", relationship = "many-to-many") %>%
+  filter(if_else(how == "murdered", episode < reveal_episode, episode <= reveal_episode)) %>%
+  summarise(known_after = max(round_table), .by = c(series, player, how, reveal_episode))
+
+reveals <- bind_rows(banished_at_rt, other_reveals) %>%
+  left_join(traitor_links %>% select(series, player, traitor_from_episode),
+            by = c("series", "player")) %>%
+  mutate(role = if_else(how == "banished" & !is.na(traitor_from_episode) &
+                          reveal_episode >= traitor_from_episode, "Traitor", "Faithful"))
+
+# ---- Behaviour of each vote --------------------------------------------------
+tally <- first_votes %>%
+  count(series, round_table, voted_for, wt = if_else(double_vote, 2L, 1L),
+        name = "votes_received") %>%
+  mutate(top = votes_received == max(votes_received), .by = c(series, round_table))
+
+present <- first_votes %>% distinct(series, round_table, player = voter)
+
+v <- first_votes %>%
+  left_join(tally, by = c("series", "round_table", "voted_for")) %>%
+  arrange(series, voter, round_table) %>%
+  mutate(prev_target = lag(voted_for), .by = c(series, voter)) %>%
+  mutate(voted_for_them_before = row_number() > 1, .by = c(series, voter, voted_for)) %>%
+  left_join(present %>% mutate(prev_still_in = TRUE),
+            by = c("series", "round_table", "prev_target" = "player")) %>%
+  left_join(reveals %>% select(series, voted_for = player, t_role = role, t_how = how,
+                              t_episode = reveal_episode, t_known = known_after),
+            by = c("series", "voted_for"))
+
+where_vote_went <- v %>%
+  transmute(series, round_table, voter, traitor, group = "Where the vote went",
+            behaviour = case_when(votes_received == 1 ~ "Cast a lone vote",
+                                  top ~ "Voted for the night's top target",
+                                  .default = "Voted for a minority pick"),
+            known_after = round_table)
+
+consistency <- v %>%
+  filter(!is.na(prev_still_in)) %>%
+  transmute(series, round_table, voter, traitor, group = "Consistency",
+            behaviour = if_else(voted_for == prev_target, "Repeated their last target", "Switched target from their last vote"),
+            known_after = round_table)
+
+target_outcome <- v %>%
+  filter(!is.na(t_role)) %>%
+  transmute(series, round_table, voter, traitor, group = "Who the target turned out to be",
+            behaviour = case_when(
+              t_role == "Traitor" & t_episode == episode & !voted_for_them_before ~
+                "Voted for a Traitor on the night they were caught (first vote for them)",
+              t_role == "Traitor" & t_episode == episode ~
+                "Voted for a Traitor on the night they were caught (had voted for them before)",
+              t_role == "Traitor" ~ "Voted for a Traitor before they were caught",
+              t_how == "murdered" ~ "Voted for a Faithful who was later murdered",
+              t_episode == episode ~ "Voted for a Faithful who was banished that night",
+              .default = "Voted for a Faithful who was banished later"),
+            known_after = t_known)
+
+revealed_traitor_votes <- v %>%
+  inner_join(reveals %>% filter(role == "Traitor") %>% select(series, voter = player, rt_known = known_after),
+             by = c("series", "voter")) %>%
+  select(series, round_table, rt = voter, rt_target = voted_for, rt_known)
+
+agreement <- v %>%
+  inner_join(revealed_traitor_votes, by = c("series", "round_table"), relationship = "many-to-many") %>%
+  filter(voter != rt, voted_for != rt) %>%   # voting for the Traitor is covered above
+  transmute(series, round_table, voter, traitor, group = "Agreement with revealed Traitors",
+            behaviour = case_when(voted_for != rt_target ~ "Voted differently from a revealed Traitor",
+                                  top ~ "Matched a revealed Traitor (top target)",
+                                  .default = "Matched a revealed Traitor (fringe pick)"),
+            known_after = rt_known)
+
+behaviours <- bind_rows(where_vote_went, consistency, target_outcome, agreement)
+
+# Voted for by a Traitor: scored for the person who RECEIVED the vote, so here
+# `voter` is the player being scored. Ordinary nights only: neither the Traitor
+# nor their target was banished that episode.
+banished_ep <- reveals %>% filter(how == "banished") %>% select(series, player, banished_episode = reveal_episode)
+
+voted_for_by_traitor <- v %>%
+  filter(traitor) %>%
+  inner_join(reveals %>% filter(role == "Traitor") %>%
+               select(series, voter = player, rt_known = known_after),
+             by = c("series", "voter")) %>%
+  left_join(banished_ep %>% rename(voter = player, voter_banished = banished_episode),
+            by = c("series", "voter")) %>%
+  left_join(banished_ep %>% rename(voted_for = player, target_banished = banished_episode),
+            by = c("series", "voted_for")) %>%
+  filter(coalesce(voter_banished != episode, TRUE), coalesce(target_banished != episode, TRUE)) %>%
+  transmute(series, round_table, voter = voted_for, traitor = voted_for_affiliation == "Traitor",
+            group = "Voted for by a Traitor",
+            behaviour = "Voted for by a revealed Traitor on a night neither of them left",
+            known_after = rt_known)
+
+scored_behaviours <- bind_rows(behaviours, voted_for_by_traitor)
+
+# ---- Points ------------------------------------------------------------------
+points_from <- function(b) {
+  b %>%
+    count(group, behaviour, traitor) %>%
+    complete(nesting(group, behaviour), traitor, fill = list(n = 0)) %>%
+    pivot_wider(names_from = traitor, values_from = n, names_prefix = "n_") %>%
+    mutate(k = n(),
+           traitor_rate  = n_TRUE / sum(n_TRUE),
+           faithful_rate = n_FALSE / sum(n_FALSE),
+           llr = log(((n_TRUE + smoothing) / (sum(n_TRUE) + smoothing * k)) /
+                       ((n_FALSE + smoothing) / (sum(n_FALSE) + smoothing * k))),
+           .by = group) %>%
+    mutate(points = if_else(group %in% not_scored, 0, round(llr / unit))) %>%
+    select(group, behaviour, traitor_votes = n_TRUE, faithful_votes = n_FALSE,
+           traitor_rate, faithful_rate, llr, points)
+}
+
+# Points for being voted for by a Traitor. There is no "other" category to compare
+# with, so compare how often Traitors and Faithfuls receive such a vote per round
+# table they attend (each first vote cast = one player at one round table).
+received_points_from <- function(r, fv) {
+  exposure <- fv %>% count(traitor, name = "exposure")
+  r %>%
+    count(group, behaviour, traitor) %>%
+    complete(nesting(group, behaviour), traitor = c(FALSE, TRUE), fill = list(n = 0)) %>%
+    left_join(exposure, by = "traitor") %>%
+    pivot_wider(names_from = traitor, values_from = c(n, exposure)) %>%
+    transmute(group, behaviour, traitor_votes = n_TRUE, faithful_votes = n_FALSE,
+              traitor_rate = n_TRUE / exposure_TRUE, faithful_rate = n_FALSE / exposure_FALSE,
+              llr = log(((n_TRUE + smoothing) / (exposure_TRUE + 2 * smoothing)) /
+                          ((n_FALSE + smoothing) / (exposure_FALSE + 2 * smoothing))),
+              points = round(llr / unit),
+              p_value = fisher.test(matrix(c(n_TRUE, exposure_TRUE - n_TRUE,
+                                             n_FALSE, exposure_FALSE - n_FALSE), 2))$p.value)
+}
+
+# All points (both kinds), learned from a chosen set of series
+all_points_from <- function(use_series) {
+  bind_rows(points_from(behaviours %>% filter(series %in% use_series)),
+            received_points_from(voted_for_by_traitor %>% filter(series %in% use_series),
+                                 first_votes %>% filter(series %in% use_series)) %>%
+              select(-p_value))
+}
+
+scorecard <- points_from(behaviours) %>%
+  mutate(p_value = pmap_dbl(list(group, traitor_votes, faithful_votes), \(g, t, f) {
+    tot <- behaviours %>% filter(group == g) %>% count(traitor)
+    fisher.test(matrix(c(t, tot$n[tot$traitor] - t, f, tot$n[!tot$traitor] - f), 2))$p.value
+  })) %>%
+  bind_rows(received_points_from(voted_for_by_traitor, first_votes))
+
+# ---- Running score before each round table -----------------------------------
+# Every player at a round table, scored on behaviours from earlier round tables
+# whose information was known by then.
+score_before <- function(b, cands, pts) {
+  b %>%
+    inner_join(pts %>% select(group, behaviour, points), by = c("group", "behaviour")) %>%
+    filter(points != 0) %>%
+    select(series, player = voter, b_rt = round_table, known_after, points) %>%
+    right_join(cands, by = c("series", "player"), relationship = "many-to-many") %>%
+    mutate(points = if_else(!is.na(b_rt) & b_rt < round_table & known_after < round_table,
+                            points, 0)) %>%
+    summarise(score = sum(points), .by = c(series, round_table, player, traitor))
+}
+
+round_metrics <- function(scored) {
+  scored %>%
+    summarise(
+      players = n(), traitors = sum(traitor),
+      top_suspect_traitor = mean(traitor[score == max(score)]),
+      top3_has_traitor = mean(replicate(200, {
+        o <- order(-score, runif(n()))
+        any(traitor[o[seq_len(min(3, n()))]])
+      })),
+      auc = mean(outer(score[traitor], score[!traitor], ">") +
+                   0.5 * outer(score[traitor], score[!traitor], "==")),
+      .by = c(series, round_table)) %>%
+    mutate(chance_top_suspect = traitors / players,
+           chance_top3 = 1 - choose(players - traitors, pmin(3, players)) /
+             choose(players, pmin(3, players)))
+}
+
+# Round tables to test on: not the first of a series (nothing to go on yet),
+# and only where there is at least one Traitor and one Faithful
+candidates <- first_votes %>% distinct(series, round_table, player = voter, traitor)
+eval_candidates <- candidates %>%
+  filter(round_table > min(round_table), .by = series) %>%
+  filter(any(traitor) & any(!traitor), .by = c(series, round_table))
+
+# Leave each series out in turn (keep each player's score for the round-by-round view)
+heldout_scores <- unique(candidates$series) %>%
+  map(\(s) score_before(scored_behaviours %>% filter(series == s),
+                        eval_candidates %>% filter(series == s),
+                        all_points_from(setdiff(unique(candidates$series), s)))) %>%
+  list_rbind()
+
+heldout <- round_metrics(heldout_scores)
+
+# How often the real round table's top target was a Traitor, for comparison
+table_hit <- first_votes %>%
+  semi_join(tally %>% filter(top), by = c("series", "round_table", "voted_for")) %>%
+  distinct(series, round_table, voted_for, voted_for_affiliation) %>%
+  summarise(real_table_hit = mean(voted_for_affiliation == "Traitor"), .by = c(series, round_table))
+
+summarise_heldout <- function(d) {
+  d %>%
+    left_join(table_hit, by = c("series", "round_table")) %>%
+    summarise(round_tables = n(),
+              top_suspect_traitor = mean(top_suspect_traitor),
+              chance_top_suspect = mean(chance_top_suspect),
+              top3_has_traitor = mean(top3_has_traitor),
+              chance_top3 = mean(chance_top3),
+              auc = mean(auc),
+              real_table_hit = mean(real_table_hit))
+}
+
+heldout_overall <- summarise_heldout(heldout)
+heldout_by_series <- heldout %>% group_by(series) %>% summarise_heldout() %>% ungroup()
+heldout_by_stage <- heldout %>%
+  mutate(stage = if_else(round_table <= 4, "Round tables 2-4", "Round table 5 onwards"),
+         .by = series) %>%
+  group_by(stage) %>% summarise_heldout() %>% ungroup()
+
+# ---- Standings in the most recent series, before the next round table --------
+# Points come from the other series, so this is a fair test of that series.
+focus_series <- last(pages$series)
+focus_last_rt <- max(candidates$round_table[candidates$series == focus_series])
+
+focus_standings <- score_before(
+  scored_behaviours %>% filter(series == focus_series),
+  candidates %>% filter(series == focus_series, round_table == focus_last_rt),
+  all_points_from(setdiff(unique(candidates$series), focus_series))
+) %>%
+  arrange(desc(score))
+
+scorecard %>% select(group, behaviour, traitor_rate, faithful_rate, points, p_value)
+heldout_overall
+heldout_by_series
+heldout_by_stage
+focus_standings
+```
+
+## Performance at each round table
+
+The held-out test above, broken down round table by round table. For each one
+it shows who the scorecard would have named as top suspect (using points
+learned from the other series and only what was known at the time), where
+each Traitor ranked, how many Traitors had been revealed by then (the main
+source of evidence), and whether the round table itself voted for a Traitor.
+
+`round_table_number` counts only first votes, so revotes don't shift the
+numbering, which makes round tables comparable across series.
+
+```{r}
+#| label: round-by-round
+
+rt_numbering <- round_tables %>%
+  filter(!revote) %>%
+  mutate(round_table_number = row_number(), .by = series) %>%
+  select(series, round_table, round_table_number, episode, banished)
+
+traitors_revealed_by <- function(s, rt) {
+  sum(reveals$series == s & reveals$role == "Traitor" & reveals$known_after < rt)
+}
+
+# Rank 1 = top suspect; "=" marks a rank shared with other players
+heldout_by_round_table <- heldout_scores %>%
+  mutate(rank = min_rank(desc(score)),
+         rank_label = str_c(rank, if_else(duplicated(score) | duplicated(score, fromLast = TRUE), "=", "")),
+         .by = c(series, round_table)) %>%
+  summarise(
+    players = n(),
+    traitors = sum(traitor),
+    top_suspects = str_c(player[score == max(score)], collapse = ", "),
+    top_score = max(score),
+    traitor_ranks = str_c(player[traitor], " (", rank_label[traitor], ")", collapse = ", "),
+    best_traitor_rank = min(rank[traitor]),
+    best_traitor_rank_label = rank_label[traitor][which.min(rank[traitor])],
+    .by = c(series, round_table)
+  ) %>%
+  left_join(heldout %>% select(series, round_table, top_suspect_traitor, chance_top_suspect,
+                               top3_has_traitor, auc),
+            by = c("series", "round_table")) %>%
+  left_join(table_hit, by = c("series", "round_table")) %>%
+  left_join(rt_numbering, by = c("series", "round_table")) %>%
+  mutate(traitors_revealed_so_far = map2_int(series, round_table, traitors_revealed_by),
+         series = fct_inorder(series)) %>%
+  relocate(series, round_table_number, episode, players, traitors, traitors_revealed_so_far,
+           top_suspects, top_score, traitor_ranks, best_traitor_rank, top_suspect_traitor,
+           chance_top_suspect, top3_has_traitor, auc, real_table_hit, banished) %>%
+  arrange(series, round_table_number)
+
+# The same, pooled across series by round table number
+performance_by_round_table_number <- heldout_by_round_table %>%
+  summarise(series = n(),
+            top_suspect_traitor = mean(top_suspect_traitor),
+            chance_top_suspect = mean(chance_top_suspect),
+            top3_has_traitor = mean(top3_has_traitor),
+            real_table_hit = mean(real_table_hit),
+            mean_traitors_revealed = mean(traitors_revealed_so_far),
+            .by = round_table_number) %>%
+  arrange(round_table_number)
+
+# ...and by how many Traitors had been revealed so far
+performance_by_traitors_revealed <- heldout_by_round_table %>%
+  mutate(traitors_revealed = if_else(traitors_revealed_so_far >= 3, "3 or more",
+                                     as.character(traitors_revealed_so_far))) %>%
+  summarise(round_tables = n(),
+            top_suspect_traitor = mean(top_suspect_traitor),
+            chance_top_suspect = mean(chance_top_suspect),
+            top3_has_traitor = mean(top3_has_traitor),
+            auc = mean(auc),
+            .by = traitors_revealed) %>%
+  arrange(traitors_revealed)
+
+# From a Faithful's own seat: they know they're Faithful, so they rank everyone
+# except themselves. Averaged over every Faithful at every round table.
+faithful_view <- heldout_scores %>%
+  filter(!traitor) %>%
+  distinct(series, round_table, me = player) %>%
+  inner_join(heldout_scores, by = c("series", "round_table"), relationship = "many-to-many") %>%
+  filter(player != me) %>%
+  summarise(top_suspect_traitor = mean(traitor[score == max(score)]),
+            chance_top_suspect = mean(traitor),
+            .by = c(series, round_table, me)) %>%
+  # average over the Faithfuls at each round table, then over round tables,
+  # so every round table counts equally (as in the other results)
+  summarise(top_suspect_traitor = mean(top_suspect_traitor),
+            chance_top_suspect = mean(chance_top_suspect), .by = c(series, round_table)) %>%
+  summarise(top_suspect_traitor = mean(top_suspect_traitor),
+            chance_top_suspect = mean(chance_top_suspect))
+
+heldout_by_round_table %>% print(n = Inf, width = Inf)
+performance_by_round_table_number
+performance_by_traitors_revealed
+faithful_view
+```
+
+## Murders: who do the Traitors choose?
+
+The Traitors know everyone's role, so their choice of victim shows who they
+see as a threat. For each murder, the pool is every Faithful still in the game
+after the previous episode's round table. Each behaviour is compared against
+what you would expect if the Traitors picked from that pool at random: a risk
+of 1.5 means 50% more likely to be murdered than chance. P-values come from
+reshuffling who was murdered within each night.
+
+Behaviours are taken from the previous episode's round table(s), plus each
+Faithful's suspicion score at that point, as the rest of the table would see
+it.
+
+```{r}
+#| label: murders
+
+set.seed(2026)
+n_murder_shuffles <- 5000
+
+rt_votes <- votes %>% filter(!revote)
+
+# Episodes with a round table, and the last one before each murder
+rt_eps <- round_tables %>% distinct(series, episode)
+
+murders <- players %>%
+  filter(fate %in% "Murdered") %>%
+  transmute(series, victim = player, murder_episode = fate_episode) %>%
+  inner_join(rt_eps %>% rename(prev_ep = episode), by = "series", relationship = "many-to-many") %>%
+  filter(prev_ep < murder_episode) %>%
+  slice_max(prev_ep, n = 1, by = c(series, victim))
+
+banished_in_ep <- players %>%
+  filter(fate %in% "Banished") %>%
+  select(series, player, banished_ep = fate_episode)
+
+# Behaviour of every Faithful at each episode's round table(s)
+traitors_then <- rt_votes %>%
+  distinct(series, episode, player = voter, role = voter_affiliation)
+
+ep_behaviour <- rt_votes %>%
+  left_join(tally %>% select(series, round_table, voted_for, target_votes = votes_received, top),
+            by = c("series", "round_table", "voted_for")) %>%
+  left_join(banished_in_ep %>% rename(voted_for = player), by = c("series", "voted_for")) %>%
+  mutate(target_survived = is.na(banished_ep) | banished_ep != episode) %>%
+  left_join(rt_votes %>%
+              filter(voter_affiliation == "Traitor") %>%
+              distinct(series, round_table, traitor = voter, traitor_target = voted_for),
+            by = c("series", "round_table"), relationship = "many-to-many") %>%
+  summarise(
+    accused_surviving_traitor = any(voted_for_affiliation == "Traitor" & target_survived),
+    voted_with_a_traitor      = any(voted_for == traitor_target & voter != traitor, na.rm = TRUE),
+    voted_with_the_room       = any(top),
+    lone_vote                 = any(target_votes == 1),
+    .by = c(series, episode, voter)
+  ) %>%
+  rename(player = voter)
+
+received <- rt_votes %>% count(series, episode, player = voted_for, name = "votes_received")
+
+# Ever voted for someone who is a Traitor still in the game
+ever_accused <- rt_votes %>%
+  filter(voted_for_affiliation == "Traitor") %>%
+  select(series, player = voter, target = voted_for, vote_ep = episode) %>%
+  inner_join(rt_eps, by = "series", relationship = "many-to-many") %>%
+  filter(vote_ep <= episode) %>%
+  left_join(banished_in_ep %>% rename(target = player), by = c("series", "target")) %>%
+  filter(is.na(banished_ep) | banished_ep > episode) %>%
+  distinct(series, episode, player) %>%
+  mutate(ever_accused_live_traitor = TRUE)
+
+# Suspicion score as the table would see it after that episode's round tables,
+# turned into a within-night percentile (0 = most cleared, 1 = most suspected)
+murder_scores <- function(pool) {
+  cands <- pool %>%
+    distinct(series, prev_ep, player) %>%
+    left_join(round_tables %>% summarise(last_rt = max(round_table), .by = c(series, episode)),
+              by = c("series", "prev_ep" = "episode")) %>%
+    mutate(round_table = last_rt + 1, traitor = FALSE)
+  score_before(scored_behaviours, cands %>% select(series, round_table, player, traitor),
+               all_points_from(unique(candidates$series))) %>%
+    left_join(cands %>% distinct(series, round_table, prev_ep), by = c("series", "round_table")) %>%
+    distinct(series, prev_ep, player, score)
+}
+
+pool <- traitors_then %>%
+  semi_join(murders, by = c("series", "episode" = "prev_ep")) %>%
+  filter(role == "Faithful") %>%
+  anti_join(banished_in_ep, by = c("series", "player", "episode" = "banished_ep")) %>%
+  rename(prev_ep = episode) %>%
+  left_join(murders %>% select(series, prev_ep, player = victim) %>% mutate(murdered = TRUE),
+            by = c("series", "prev_ep", "player")) %>%
+  left_join(ep_behaviour, by = c("series", "prev_ep" = "episode", "player")) %>%
+  left_join(received, by = c("series", "prev_ep" = "episode", "player")) %>%
+  left_join(ever_accused, by = c("series", "prev_ep" = "episode", "player")) %>%
+  mutate(across(c(murdered, accused_surviving_traitor, voted_with_a_traitor, voted_with_the_room,
+                  lone_vote, ever_accused_live_traitor), \(x) coalesce(x, FALSE)),
+         under_suspicion = coalesce(votes_received, 0L) > 0)
+
+pool <- pool %>%
+  left_join(murder_scores(pool), by = c("series", "prev_ep", "player")) %>%
+  mutate(score_percentile = (rank(score, ties.method = "average") - 1) / pmax(n() - 1, 1),
+         most_cleared_third = score_percentile <= 1/3,
+         most_suspected_third = score_percentile >= 2/3,
+         .by = c(series, prev_ep)) %>%
+  mutate(pool_size = n(), murders_tonight = sum(murdered), .by = c(series, prev_ep))
+
+murders_covered <- murders %>%
+  left_join(pool %>% filter(murdered) %>% distinct(series, player, prev_ep) %>% mutate(in_pool = TRUE),
+            by = c("series", "victim" = "player", "prev_ep")) %>%
+  summarise(murders = n(), analysed = sum(!is.na(in_pool)))
+
+# Observed vs expected murders for each behaviour, with a reshuffle p-value
+night_index <- split(seq_len(nrow(pool)), interaction(pool$series, pool$prev_ep, drop = TRUE))
+shuffled_murders <- replicate(n_murder_shuffles, {
+  m <- logical(nrow(pool))
+  for (i in night_index) m[sample(i, sum(pool$murdered[i]))] <- TRUE
+  m
+})
+
+murder_behaviours <- c(
+  "Voted for a Traitor who survived the vote" = "accused_surviving_traitor",
+  "Has voted for a Traitor still in the game" = "ever_accused_live_traitor",
+  "Voted the same way as a Traitor"           = "voted_with_a_traitor",
+  "Voted for the night's top target"          = "voted_with_the_room",
+  "Cast a lone vote"                          = "lone_vote",
+  "Received votes themselves"                 = "under_suspicion",
+  "Among the most cleared third (score)"      = "most_cleared_third",
+  "Among the most suspected third (score)"    = "most_suspected_third"
+)
+
+murder_risk <- imap(murder_behaviours, \(col, label) {
+  x <- pool[[col]]
+  observed <- sum(pool$murdered & x)
+  expected <- sum((pool$murders_tonight / pool$pool_size)[x])
+  null <- colSums(shuffled_murders & x)
+  tibble(behaviour = label,
+         faithful_nights = sum(x),
+         murdered = observed,
+         expected = round(expected, 1),
+         risk = round(observed / expected, 2),
+         p_value = round((sum(abs(null - mean(null)) >= abs(observed - mean(null))) + 1) /
+                           (n_murder_shuffles + 1), 3))
+}) %>%
+  list_rbind()
+
+# Average suspicion-score percentile of the people murdered (0.5 = random)
+victim_percentile <- pool %>%
+  filter(murdered) %>%
+  summarise(victims = n(), mean_percentile = round(mean(score_percentile), 2))
+
+murders_covered
+murder_risk
+victim_percentile
+```
+
+## Plots
+
+```{r}
+#| label: plots
+#| fig-width: 10
+#| fig-height: 6
+
+role_colours <- c("More typical of Traitors" = "#B3261E", "More typical of Faithfuls" = "#3B6E8F")
+
+# 1. The scorecard, ranked from most typical of Traitors (top) to least (bottom)
+scorecard %>%
+  mutate(label = str_c(behaviour, "  (", traitor_votes, " T / ", faithful_votes, " F)"),
+         label = fct_reorder(label, llr),   # highest log-odds at the top
+         side = if_else(llr > 0, "More typical of Traitors", "More typical of Faithfuls"),
+         points_text = case_when(group %in% not_scored ~ "not scored",
+                                 points == 0 ~ "0",
+                                 .default = sprintf("%+d", as.integer(points)))) %>%
+  ggplot(aes(llr, label, fill = side)) +
+  geom_col(width = 0.7) +
+  geom_vline(xintercept = 0, colour = "grey40") +
+  geom_text(aes(label = points_text, hjust = if_else(llr > 0, -0.2, 1.2)), size = 3.3) +
+  scale_x_continuous(expand = expansion(mult = 0.2)) +
+  scale_fill_manual(values = role_colours) +
+  labs(title = "How much each voting behaviour should shift your suspicion",
+       subtitle = str_c("Log likelihood ratio per vote. Labels show points (1 point = ",
+                        unit, " log-odds).\nCounts are Traitor votes / Faithful votes (votes received for the 'voted for by' row)."),
+       x = "Log-odds shift", y = NULL, fill = NULL) +
+  theme_minimal(base_size = 11) +
+  theme(legend.position = "top", panel.grid.major.y = element_blank(),
+        plot.title.position = "plot")
+
+# 2. Held-out test: how often the top suspect was a Traitor
+heldout_by_series %>%
+  bind_rows(heldout_overall %>% mutate(series = "All series")) %>%
+  mutate(series = fct_rev(fct_inorder(series))) %>%
+  ggplot(aes(y = series)) +
+  geom_segment(aes(x = chance_top_suspect, xend = top_suspect_traitor, yend = series), colour = "grey60") +
+  geom_point(aes(x = chance_top_suspect, colour = "Chance"), size = 3) +
+  geom_point(aes(x = real_table_hit, colour = "Real round table's choice"), size = 3, shape = 17) +
+  geom_point(aes(x = top_suspect_traitor, colour = "Score's top suspect"), size = 3.5) +
+  scale_x_continuous(labels = scales::label_percent(), limits = c(0, 1)) +
+  scale_colour_manual(values = c("Chance" = "grey55", "Real round table's choice" = "#E0A100",
+                                 "Score's top suspect" = "#B3261E")) +
+  labs(title = "How often the top suspect was a Traitor",
+       subtitle = "Each series scored with points learned from the other series, before every round table",
+       x = "Round tables where the pick was a Traitor", y = NULL, colour = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", panel.grid.major.y = element_blank())
+
+# 3. Standings in the most recent series before its last round table
+focus_standings %>%
+  mutate(player = fct_reorder(player, score),
+         role = if_else(traitor, "Traitor (known to viewers)", "Faithful")) %>%
+  ggplot(aes(score, player, colour = role)) +
+  geom_vline(xintercept = 0, colour = "grey70") +
+  geom_segment(aes(x = 0, xend = score, yend = player), linewidth = 0.8) +
+  geom_point(size = 3) +
+  geom_text(aes(label = score, hjust = if_else(score < 0, 2.2, -1.2)), size = 3.4, show.legend = FALSE) +
+  scale_x_continuous(expand = expansion(mult = 0.2)) +
+  scale_colour_manual(values = c("Traitor (known to viewers)" = "#B3261E", "Faithful" = "#3B6E8F")) +
+  labs(title = str_c(focus_series, ": suspicion scores before the last round table"),
+       subtitle = "Points learned from the other series. Higher = more suspicious.",
+       x = "Suspicion score", y = NULL, colour = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", panel.grid.major.y = element_blank())
+
+# 4. Murders: which Faithfuls were murdered more or less often than chance
+murder_risk %>%
+  mutate(behaviour = fct_reorder(behaviour, risk),
+         label = str_c(murdered, " murdered vs ", expected, " expected (p = ", p_value, ")")) %>%
+  ggplot(aes(risk, behaviour)) +
+  geom_vline(xintercept = 1, linetype = 2, colour = "grey50") +
+  geom_segment(aes(x = 1, xend = risk, yend = behaviour), colour = "grey70") +
+  geom_point(aes(colour = risk > 1), size = 3.5, show.legend = FALSE) +
+  geom_text(aes(label = label), nudge_y = 0.32, size = 3, colour = "grey30") +
+  scale_x_log10(breaks = c(0.5, 0.75, 1, 1.5, 2), limits = c(0.5, 2)) +
+  scale_colour_manual(values = c("TRUE" = "#B3261E", "FALSE" = "#3B6E8F")) +
+  labs(title = "Which Faithfuls get murdered?",
+       subtitle = "Murder risk against picking a Faithful at random each night (1 = no difference)",
+       x = "Murder risk (log scale)", y = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid.major.y = element_blank())
+
+# 5. Round by round, pooled across series: how accuracy builds up over a game
+performance_by_round_table_number %>%
+  filter(series >= 3) %>%
+  select(round_table_number, series, `Score's top suspect` = top_suspect_traitor,
+         `Real round table's choice` = real_table_hit, Chance = chance_top_suspect) %>%
+  pivot_longer(-c(round_table_number, series), names_to = "pick", values_to = "hit_rate") %>%
+  ggplot(aes(round_table_number, hit_rate, colour = pick)) +
+  geom_line(aes(linetype = pick == "Chance"), linewidth = 0.9, show.legend = FALSE) +
+  geom_point(size = 2.5) +
+  scale_x_continuous(breaks = 1:20) +
+  scale_y_continuous(labels = scales::label_percent(), limits = c(0, 1)) +
+  scale_colour_manual(values = c("Score's top suspect" = "#B3261E",
+                                 "Real round table's choice" = "#E0A100",
+                                 "Chance" = "grey55")) +
+  labs(title = "How often the pick was a Traitor, round table by round table",
+       subtitle = "Averaged across series; round table numbers reached by at least three series",
+       x = "Round table number (first votes only)", y = NULL, colour = NULL) +
+  theme_minimal(base_size = 12) +
+  theme(legend.position = "top", panel.grid.minor = element_blank())
+
+# 6. Every round table in every series: was the top suspect a Traitor?
+heldout_by_round_table %>%
+  mutate(label = best_traitor_rank_label,
+         series = fct_rev(series)) %>%
+  ggplot(aes(round_table_number, series, fill = top_suspect_traitor)) +
+  geom_tile(colour = "white", linewidth = 1) +
+  geom_text(aes(label = label), size = 3.5) +
+  scale_x_continuous(breaks = 2:max(heldout_by_round_table$round_table_number)) +
+  scale_fill_gradient(low = "#EDEDED", high = "#B3261E", labels = scales::label_percent(),
+                      limits = c(0, 1)) +
+  labs(title = "Was the scorecard's top suspect a Traitor?",
+       subtitle = "Each tile is one round table. Shade = share of joint top suspects who were Traitors.\nNumber = rank of the highest-placed Traitor (1 = top suspect, = means tied).",
+       x = "Round table number (first votes only)", y = NULL, fill = "Top suspect\na Traitor") +
+  theme_minimal(base_size = 12) +
+  theme(panel.grid = element_blank(), plot.title.position = "plot")
+```
