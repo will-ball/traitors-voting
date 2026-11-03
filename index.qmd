@@ -1,8 +1,9 @@
 ---
-title: "Can a Faithful spot a Traitor from the votes alone?"
-subtitle: "A voting scorecard for The Traitors UK"
+
+title: "Traitors UK: Can a Faithful spot a Traitor from the votes alone?"
+subtitle: "Testing a running suspicion score on every UK round table vote"
+description: "Across six UK series of The Traitors so far, the scorecard's top suspect was a Traitor 45% of the time, nearly twice as likely as a random pick."
 author: "Dr Will Ball"
-description: "Can a Faithful spot the Traitors from round table votes alone? A running suspicion score built from every UK Traitors vote."
 # The image used in link previews when the post is shared (made by make_header.R)
 image: share.png
 lang: en-GB
@@ -25,7 +26,7 @@ execute:
   message: false
 ---
 
-Before she went into the castle for the second series of The Celebrity Traitors, Hannah Fry recorded a YouTube video, [*How would Alan Turing have played the Traitors?*](https://youtu.be/twDvxNooI_4), released after the show. In it she sets out a way for a Faithful to work out who the Traitors are: the first part of her strategy is to identify how Traitors’ voting patterns differ from Faithfuls’, then keep a running score of who is under most suspicion. She didn’t get much chance to test it, because she was recruited as a Traitor herself.
+Before she went into the castle for the second series of The Celebrity Traitors, Professor of Mathematics Hannah Fry recorded a YouTube video, [*How would Alan Turing have played the Traitors?*](https://youtu.be/twDvxNooI_4), released after the show. In it she sets out a way for a Faithful to work out who the Traitors are: the first part of her strategy is to identify how Traitors’ voting patterns differ from Faithfuls’, then keep a running score of who is under most suspicion. She didn’t get much chance to test it, because she was recruited as a Traitor herself.
 
 She also had less data to look back on, so I thought I’d have a go at building that system for myself, and testing how well it identifies Traitors compared with pure chance (picking someone at random) and with the votes actually cast at each round table in every UK series so far.
 
