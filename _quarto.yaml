@@ -1,4 +1,17 @@
-   project:
-     output-dir: docs
-     render:
-       - index.qmd
+project:
+  type: website
+  output-dir: docs
+  render:
+    - index.qmd
+  resources:
+    - header.png            
+
+website:
+  title: "Will Ball"       
+  site-url: https://traitors.wpball.com
+  repo-url: https://github.com/will-ball/traitors-voting
+  repo-actions: [issue, source]   
+  open-graph: true         
+  twitter-card: true
+  page-footer:
+    center: "Spotted a mistake or have an idea? [Open an issue on GitHub](https://github.com/will-ball/traitors-voting/issues)"
