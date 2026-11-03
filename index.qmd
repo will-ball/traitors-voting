@@ -1,5 +1,4 @@
 ---
-
 title: "Traitors UK: Can a Faithful spot a Traitor from the votes alone?"
 subtitle: "Testing a running suspicion score on every UK round table vote"
 description: "Across six UK series of The Traitors so far, the scorecard's top suspect was a Traitor 45% of the time, nearly twice as likely as a random pick."
