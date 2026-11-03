@@ -2,6 +2,9 @@
 title: "Can a Faithful spot a Traitor from the votes alone?"
 subtitle: "A voting scorecard for The Traitors UK"
 author: "Dr Will Ball"
+description: "Can a Faithful spot the Traitors from round table votes alone? A running suspicion score built from every UK Traitors vote."
+image: header.png
+lang: en-GB
 date: today
 format:
   html:
@@ -902,3 +905,6 @@ builds up, and make my vote count once the first Traitor is out.
 statistically significant on their own; the held-out test is the better guide
 to whether the score works. Recruitment timings and double votes are entered
 by hand. Fire-pit votes and tie-break revotes are left out.
+
+
+If you spot a mistake or want to suggest an improvement, [open an issue on GitHub](https://github.com/will-ball/traitors-voting/issues).
