@@ -138,6 +138,10 @@ fetch_page <- function(page) {
 clean_cell <- function(x) {
   x %>%
     str_remove_all("\\[[^\\]]*\\]") %>%
+    # Wikipedia marks a double vote with "(2)" after the name, e.g. "Matthew (2)".
+    # Remove it so the vote counts for Matthew. (Who held each double vote is
+    # listed by hand in double_votes.)
+    str_remove("\\s*\\(\\d\\)$") %>%
     str_replace_all("\\p{Pd}", "-") %>%
     str_squish()
 }
