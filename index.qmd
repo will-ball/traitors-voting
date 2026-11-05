@@ -1,7 +1,7 @@
 ---
 title: "Traitors UK: Can a Faithful spot a Traitor from the votes alone?"
 subtitle: "Testing a running suspicion score on every UK round table vote"
-description: "Across six UK series of The Traitors so far, the scorecard's top suspect was a Traitor 45% of the time, nearly twice as likely as a random pick."
+description: "Across six UK series of The Traitors so far, the scorecard's top suspect was a Traitor 49% of the time, nearly twice as likely as a random pick."
 author: "Dr Will Ball"
 # The image used in link previews when the post is shared (made by make_header.R)
 image: share.png
@@ -887,7 +887,7 @@ simple_rules %>%
 ```
 
 The simple version's top suspect was a Traitor `r scales::percent(simple_hit)`
-of the time, close to the full scorecard's `r scales::percent(overall$score)`.
+of the time, a little below the full scorecard's `r scales::percent(overall$score)`.
 (Its points were chosen with all six series in view, so that figure is a
 little flattering.)
 
